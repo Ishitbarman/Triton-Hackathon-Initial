@@ -93,5 +93,5 @@ def detect_threats(request: MonitorInput) -> list[MonitorFinding]:
                 source="conversation_history",
             )
         )
-
+ 
     return findings

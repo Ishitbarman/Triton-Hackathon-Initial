@@ -151,7 +151,7 @@ def assess_action(request: MonitorInput) -> MonitorResult:
         explanation = (
             "No configured threat patterns were detected. "
             "This does not guarantee that the action is safe."
-        )
+        ) 
 
     if decision == "quarantine":
         explanation += " Action requires user resume or abort."
