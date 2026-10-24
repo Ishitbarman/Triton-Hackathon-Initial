@@ -1,0 +1,28 @@
+[
+  {
+    "run_id": "safe-run-001",
+    "step": 1,
+    "event_type": "task_start",
+    "source": "user_input",
+    "trust_label": "trusted",
+    "relevant_text": "Research top sustainable tech trends for 2026.",
+    "detected_signals": [],
+    "risk_score": 0,
+    "proposed_action": "none",
+    "decision": "ALLOW",
+    "explanation": "Task anchor saved successfully."
+  },
+  {
+    "run_id": "safe-run-001",
+    "step": 2,
+    "event_type": "tool_call",
+    "source": "https://trusted-research.com/trends",
+    "trust_label": "trusted",
+    "relevant_text": "Green tech adoption grew by 15% globally.",
+    "detected_signals": [],
+    "risk_score": 5,
+    "proposed_action": "web_search(query='sustainable tech trends 2026')",
+    "decision": "ALLOW",
+    "explanation": "Action is safe and sourced from trusted material."
+  }
+]
