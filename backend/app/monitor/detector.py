@@ -9,12 +9,27 @@ DIRECT_PATTERNS = [
     r"\bdisregard (all )?(previous|prior|above) instructions\b",
     r"\bforget your (original )?task\b",
     r"\boverride (the )?(system|original) instructions\b",
+    (
+        r"\b(bypass|disable|override|circumvent) (the"
+        r" )?((safety|security) )?(restrictions?|guardrails?|filters?|rules?|policy|safety|security)\b"
+    ),
+    (
+        r"\bwithout (any )?((safety|security) )?(restrictions?|guardrails?|filters?|rules?|policy|safety|security)\b"
+    ),
 ]
+
+EXFILTRATION_TARGETS = (
+    r"(system prompt|hidden instructions?|credentials?|passwords?|api[ _-]?keys?|secrets?)"
+)
 
 INDIRECT_PATTERNS = [
     r"\bignore (the )?(user'?s?|original) (request|task|instructions)\b",
-    r"\breveal (the )?(system prompt|secret|hidden instructions)\b",
-    r"\bsend .*secret\b",
+    (
+        r"\b(reveal|show|print|leak|display|output|extract|dump|tell me|give"
+        rf" me|send) (the |all |any |your |me |a )?{EXFILTRATION_TARGETS}\b"
+    ),
+    r"\bwhat (is|are) (your |the )?(system prompt|hidden instructions?)\b",
+    r"\bsend .*?(secret|credential|password|api[ _-]?key)\b",
     r"\bexfiltrate\b",
 ]
 
@@ -41,11 +56,33 @@ def find_matches(text: str, patterns: list[str]) -> list[str]:
 
 
 def detect_threats(request: MonitorInput) -> list[MonitorFinding]:
-    """Detect suspicious instructions and return supporting evidence."""
+    """Detect suspicious instructions across task anchor, current turn, and history."""
     findings = []
-    current = request.current_turn
+    task = request.task_anchor or ""
+    current = request.current_turn or ""
     history_text = "\n".join(request.history)
 
+    # 1. Inspect task anchor for direct overrides and safety bypass attempts
+    for evidence in find_matches(task, DIRECT_PATTERNS):
+        findings.append(
+            MonitorFinding(
+                signal="direct_override",
+                evidence=evidence,
+                source="user_task",
+            )
+        )
+
+    # 2. Inspect task anchor for requests to reveal or exfiltrate secrets / credentials / prompts
+    for evidence in find_matches(task, INDIRECT_PATTERNS):
+        findings.append(
+            MonitorFinding(
+                signal="indirect_instruction",
+                evidence=evidence,
+                source="user_task",
+            )
+        )
+
+    # 3. Inspect current turn for direct overrides
     for evidence in find_matches(current, DIRECT_PATTERNS):
         findings.append(
             MonitorFinding(
@@ -55,6 +92,7 @@ def detect_threats(request: MonitorInput) -> list[MonitorFinding]:
             )
         )
 
+    # 4. Inspect current turn for indirect instructions from untrusted sources
     if request.trust_label.lower() in {
         "untrusted", "untrusted_source", "external"
     }:
@@ -67,6 +105,7 @@ def detect_threats(request: MonitorInput) -> list[MonitorFinding]:
                 )
             )
 
+    # 5. Inspect current turn for tool redirection patterns
     tool_matches = find_matches(current, TOOL_PATTERNS)
 
     for evidence in tool_matches:
@@ -78,6 +117,7 @@ def detect_threats(request: MonitorInput) -> list[MonitorFinding]:
             )
         )
 
+    # 6. Inspect multi-turn cross-turn pattern (override in history + tool redirection in current turn)
     previous_override = bool(
         find_matches(history_text, DIRECT_PATTERNS)
     )
@@ -93,5 +133,5 @@ def detect_threats(request: MonitorInput) -> list[MonitorFinding]:
                 source="conversation_history",
             )
         )
- 
+
     return findings

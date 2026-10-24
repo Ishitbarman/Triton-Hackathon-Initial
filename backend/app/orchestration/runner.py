@@ -40,6 +40,9 @@ class RunContext:
     decision_event: asyncio.Event | None = None
     user_decision: str | None = None
     scenario_id: str | None = None
+    provider: str | None = None
+    untrusted_content: str | None = None
+    history: list[str] = field(default_factory=list)
 
 
 _runs: dict[str, RunContext] = {}
@@ -81,9 +84,16 @@ def _audit(
     )
 
 
-def _get_agent_provider():
-    """Select the configured provider; scripted mode is the safe default."""
-    provider_mode = os.getenv("AGENT_PROVIDER", "scripted").strip().lower()
+def _get_agent_provider(provider_override: str | None = None):
+    """Select the provider for this run.
+
+    If the request supplies a provider value ('scripted' or 'live'), use it.
+    Otherwise fall back to the AGENT_PROVIDER environment variable.
+    """
+    provider_mode = (
+        provider_override
+        or os.getenv("AGENT_PROVIDER", "scripted")
+    ).strip().lower()
 
     if provider_mode == "scripted":
         return ScriptedAgentProvider()
@@ -98,7 +108,7 @@ def _get_agent_provider():
 async def _run_placeholder(context: RunContext) -> None:
     """Run scenarios through the monitor, gate, simulated tools, and audit."""
 
-    scenario = context.scenario_id or "safe"
+    scenario = context.scenario_id
 
     scenario_sources = {
         "safe": [
@@ -145,9 +155,125 @@ async def _run_placeholder(context: RunContext) -> None:
             explanation="Saved the user's task as the task anchor.",
         )
 
-        sources = scenario_sources.get(scenario)
-        if sources is None:
-            raise ValueError(f"Unknown scenario_id: {scenario}")
+        # -------------------------------------------------------------
+        # Preflight monitor assessment on user task (task_anchor)
+        # with an empty proposed action BEFORE calling any agent provider.
+        # -------------------------------------------------------------
+        preflight_input = MonitorInput(
+            task_anchor=context.task,
+            current_turn="",
+            history=[],
+            source="user_task",
+            trust_label="trusted",
+            proposed_action={},
+            outbound_action=False,
+            canary_secret=CANARY_SECRET,
+        )
+        preflight_result = assess_action(preflight_input)
+        preflight_decision = PolicyDecision(preflight_result.decision)
+
+        if preflight_decision in (PolicyDecision.QUARANTINE, PolicyDecision.BLOCK):
+            await _emit(
+                context,
+                EventType.MONITOR_RESULT,
+                source="security_monitor",
+                trust_label=TrustLabel.UNTRUSTED,
+                relevant_text=preflight_result.relevant_text or context.task,
+                detected_signals=preflight_result.detected_signals,
+                risk_score=preflight_result.risk_score,
+                proposed_action=None,
+                decision=preflight_decision,
+                explanation=preflight_result.explanation,
+            )
+
+            _audit(
+                context,
+                "preflight_monitor_result",
+                risk_score=preflight_result.risk_score,
+                decision=preflight_result.decision,
+                detected_signals=preflight_result.detected_signals,
+            )
+
+            preflight_gate = evaluate_action(
+                action=None,
+                risk_score=preflight_result.risk_score,
+                monitor_decision=preflight_decision,
+            )
+
+            await _emit(
+                context,
+                EventType.POLICY_DECISION,
+                source="policy_gate",
+                risk_score=preflight_result.risk_score,
+                decision=preflight_gate.decision,
+                explanation=preflight_gate.reason,
+            )
+
+            _audit(
+                context,
+                "preflight_policy_decision",
+                risk_score=preflight_result.risk_score,
+                decision=preflight_gate.decision.value,
+                reason=preflight_gate.reason,
+            )
+
+            if preflight_gate.decision == PolicyDecision.BLOCK:
+                context.status = "completed"
+                await _emit(
+                    context,
+                    EventType.RUN_COMPLETED,
+                    explanation="Task blocked during preflight security assessment. Provider was not called.",
+                )
+                return
+
+            if preflight_gate.decision == PolicyDecision.QUARANTINE:
+                context.status = "awaiting_decision"
+                context.decision_event = asyncio.Event()
+                context.user_decision = None
+
+                await context.decision_event.wait()
+
+                if context.user_decision == "abort":
+                    context.status = "aborted"
+                    await _emit(
+                        context,
+                        EventType.RUN_ABORTED,
+                        source="user",
+                        decision=PolicyDecision.BLOCK,
+                        explanation="Run aborted by user during preflight quarantine. Provider was not called.",
+                    )
+                    _audit(context, "preflight_run_aborted")
+                    return
+
+                context.status = "running"
+                await _emit(
+                    context,
+                    EventType.POLICY_DECISION,
+                    source="policy_gate",
+                    decision=PolicyDecision.ALLOW,
+                    explanation="User resumed the quarantined task. Proceeding to agent provider.",
+                )
+                _audit(context, "preflight_user_resumed")
+
+        if scenario:
+            sources = scenario_sources.get(scenario)
+            if sources is None:
+                raise ValueError(f"Unknown scenario_id: {scenario}")
+        else:
+            # Freeform / Normal Mode: build sources from user's history and untrusted content
+            sources = []
+            for i, turn_text in enumerate(context.history):
+                if turn_text.strip():
+                    sources.append((f"prior-turn-{i + 1}", turn_text.strip()))
+
+            content = (context.untrusted_content or "").strip()
+            if content:
+                sources.append(("untrusted-user-content", content))
+            elif not sources:
+                sources.append((
+                    "untrusted-user-content",
+                    "No external untrusted content provided.",
+                ))
 
         for source_id, text in sources:
             await _emit(
@@ -156,17 +282,17 @@ async def _run_placeholder(context: RunContext) -> None:
                 source=source_id,
                 trust_label=TrustLabel.UNTRUSTED,
                 relevant_text=text,
-                explanation="Received simulated source content.",
+                explanation="Received untrusted source content for security inspection.",
             )
 
         source_text = "\n".join(text for _, text in sources)
         source_ids = [source_id for source_id, _ in sources]
 
-        provider = _get_agent_provider()
+        provider = _get_agent_provider(context.provider)
         action = await provider.propose_action(
             task=context.task,
             source_text=source_text,
-            scenario_id=scenario,
+            scenario_id=context.scenario_id,
             source_ids=source_ids,
         )
         action_data = action.model_dump(mode="json")
@@ -372,10 +498,18 @@ async def _run_placeholder(context: RunContext) -> None:
 
 def start_run(request: RunStartRequest) -> RunStartResponse:
     run_id = str(uuid4())
+    scenario_id = (
+        request.scenario_id.strip()
+        if request.scenario_id and request.scenario_id.strip()
+        else None
+    )
     context = RunContext(
         run_id=run_id,
         task=request.task,
-        scenario_id=request.scenario_id,
+        scenario_id=scenario_id,
+        provider=request.provider,
+        untrusted_content=request.untrusted_content,
+        history=list(request.history or []),
     )
     _runs[run_id] = context
 

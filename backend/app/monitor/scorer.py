@@ -160,14 +160,19 @@ def assess_action(request: MonitorInput) -> MonitorResult:
     else:
         explanation += " Action passes the deterministic risk threshold."
 
+    if request.proposed_action:
+        relevant_text = action_text
+    elif findings and any(f.source == "user_task" for f in findings):
+        relevant_text = request.task_anchor
+    else:
+        relevant_text = request.current_turn or request.task_anchor
+
     return MonitorResult(
         risk_score=score,
         decision=decision,
         detected_signals=sorted(signals),
         findings=findings,
-        relevant_text=(
-            action_text if findings else request.current_turn
-        ),
+        relevant_text=relevant_text,
         explanation=explanation,
     )
 

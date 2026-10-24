@@ -8,6 +8,9 @@ class RunStartRequest(BaseModel):
 
     task: str = Field(min_length=1)
     scenario_id: str | None = None
+    provider: Literal["scripted", "live"] | None = None
+    untrusted_content: str | None = None
+    history: list[str] | None = None
 
 
 class RunStartResponse(BaseModel):
