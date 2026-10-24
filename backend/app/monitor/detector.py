@@ -12,7 +12,7 @@ DIRECT_PATTERNS = [
 ]
 
 INDIRECT_PATTERNS = [
-    r"\bignore (the )?(user|original) (request|task|instructions)\b",
+    r"\bignore (the )?(user'?s?|original) (request|task|instructions)\b",
     r"\breveal (the )?(system prompt|secret|hidden instructions)\b",
     r"\bsend .*secret\b",
     r"\bexfiltrate\b",
